@@ -39,6 +39,7 @@ ERROR_ORDER = {
     "Нет в таблице":         2,
     "Разная дата":           3,
     "Нет в Битрикс":         4,
+    "Другой менеджер":       5,
 }
 
 # цвета
@@ -318,6 +319,7 @@ def compare(df_b: pd.DataFrame, df_s: pd.DataFrame) -> dict:
     comparison   = defaultdict(list)
     not_in_table = defaultdict(list)
     not_in_bitrix= defaultdict(list)
+    handled_cross_ids = set()  # ID которые уже обработаны как "другой менеджер"
 
     # ── проходим по Битрикс ──
     for _, row_b in df_b.iterrows():
@@ -395,30 +397,79 @@ def compare(df_b: pd.DataFrame, df_s: pd.DataFrame) -> dict:
             continue
 
         if rows_s.empty:
-            # Есть в Продажи по другому менеджеру — тоже "нет в таблице" для этого
-            errors.append({
-                "тип":         "Нет в таблице",
-                "стадия":      stage,
-                "id":          bid,
-                "дата_б":      date_raw,
-                "сумма_б":     total_b,
-                "сумма_т":     0,
-                "расхождение": total_b,
-                "менеджер":    mgr,
-                "что_делать":  f"Добавить ID {bid} в таблицу продаж. Сумма Битрикс: {total_b:,.0f}₸",
-            })
-            not_in_table[mgr].append({
-                "id": bid, "ответственный": resp,
-                "дата": date_fmt,
-                "цветы": цветы_б, "клубника": клубника_б,
-                "доставка": доставка_б, "шары": row_b["Шары_итого"],
-                "итого": total_b,
-            })
-            comparison[mgr].append(_cmp_row(
-                bid, resp, date_fmt, "", dates_b, set(),
-                total_b, 0, цветы_б, 0, клубника_б, 0, доставка_б, 0,
-                row_b["Шары_итого"], 0, "❌"
-            ))
+            # ID есть в Продажи, но у другого менеджера
+            other_rows = df_s[df_s["ID"] == bid]
+            if not other_rows.empty:
+                # Записано у другого менеджера — жёлтая ошибка
+                other_mgr = other_rows["Менеджер"].iloc[0]
+                total_t = other_rows["Итого"].sum()
+                цветы_т = other_rows["Букет"].sum()
+                клубника_т = other_rows["Клубника"].sum()
+                доставка_т = other_rows["Доставка"].sum()
+                dates_s = set().union(*other_rows["Все_даты"].tolist())
+                date_t = other_rows["Дата_fmt"].iloc[0]
+                diff = abs(total_b - total_t)
+
+                err_type = "Другой менеджер"
+                что_делать = (
+                    f"В Битрикс ответственный: {resp} ({mgr}), "
+                    f"но оплата записана у: {other_mgr}. "
+                    f"Сумма Битрикс: {total_b:,.0f}₸, Таблица: {total_t:,.0f}₸"
+                )
+                errors.append({
+                    "тип":         err_type,
+                    "стадия":      stage,
+                    "id":          bid,
+                    "дата_б":      date_raw,
+                    "сумма_б":     total_b,
+                    "сумма_т":     total_t,
+                    "расхождение": diff,
+                    "менеджер":    mgr,
+                    "что_делать":  что_делать,
+                })
+                # добавляем в сравнение основного менеджера (Битрикс)
+                note = f"⚠️ Оплата у др. менеджера\nБитрикс: {mgr} / Таблица: {other_mgr} / Сумма: {total_t:,.0f}"
+                comparison[mgr].append(_cmp_row(
+                    bid, resp, date_fmt, date_t, dates_b, dates_s,
+                    total_b, total_t, цветы_б, цветы_т,
+                    клубника_б, клубника_т, доставка_б, доставка_т,
+                    row_b["Шары_итого"], 0, "⚠️", note=note
+                ))
+                # добавляем в сравнение другого менеджера
+                label2 = f"{resp} (Битрикс: {mgr})"
+                comparison[other_mgr].append(_cmp_row(
+                    bid, label2, date_fmt, date_t, dates_b, dates_s,
+                    total_b, total_t, цветы_б, цветы_т,
+                    клубника_б, клубника_т, доставка_б, доставка_т,
+                    row_b["Шары_итого"], 0, "⚠️", note=note
+                ))
+                # убираем этот ID из "Нет в Битрикс" для другого менеджера
+                handled_cross_ids.add(bid)
+            else:
+                # Действительно нет нигде
+                errors.append({
+                    "тип":         "Нет в таблице",
+                    "стадия":      stage,
+                    "id":          bid,
+                    "дата_б":      date_raw,
+                    "сумма_б":     total_b,
+                    "сумма_т":     0,
+                    "расхождение": total_b,
+                    "менеджер":    mgr,
+                    "что_делать":  f"Добавить ID {bid} в таблицу продаж. Сумма Битрикс: {total_b:,.0f}₸",
+                })
+                not_in_table[mgr].append({
+                    "id": bid, "ответственный": resp,
+                    "дата": date_fmt,
+                    "цветы": цветы_б, "клубника": клубника_б,
+                    "доставка": доставка_б, "шары": row_b["Шары_итого"],
+                    "итого": total_b,
+                })
+                comparison[mgr].append(_cmp_row(
+                    bid, resp, date_fmt, "", dates_b, set(),
+                    total_b, 0, цветы_б, 0, клубника_б, 0, доставка_б, 0,
+                    row_b["Шары_итого"], 0, "❌"
+                ))
             continue
 
         # Обычное сравнение
@@ -482,7 +533,7 @@ def compare(df_b: pd.DataFrame, df_s: pd.DataFrame) -> dict:
     # ── проходим по Продажи — ищем "Нет в Битрикс" ──
     for _, row_s in df_s.iterrows():
         sid = row_s["ID"]
-        if sid not in bitrix_ids:
+        if sid not in bitrix_ids and sid not in handled_cross_ids:
             mgr = row_s["Менеджер"]
             total_t = row_s["Итого"]
             errors.append({
@@ -723,6 +774,7 @@ def _build_errors_sheet(wb, result, df_b):
         for e in errs:
             err_type = e["тип"]
             is_red = err_type in ("Сумма не совпадает", "Нет в таблице", "Нет в Битрикс")
+            is_yellow_cross = err_type == "Другой менеджер"
             row_bg = C_RED_BG if is_red else C_YEL_BG
             row_fg = C_RED_FG if is_red else C_YEL_FG
 
